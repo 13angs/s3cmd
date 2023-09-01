@@ -1,19 +1,20 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mongo-backup
+  name: sqlserver-backup
 spec:
   template:
     spec:
       volumes:
         - name: backup-volume
           emptyDir: {}
+        - name: sqlserver-default-data
+          persistentVolumeClaim:
+            claimName: sqlserver-default-pvc
       containers:
       - name: 'backup-and-compress'
-        image: mongo:latest
+        image: mcr.microsoft.com/mssql/server:2022-latest
         volumeMounts:
-          - name: backup-volume
-            mountPath: /backup/mongo
           - name: backup-volume
             mountPath: /config
         env:
@@ -22,47 +23,47 @@ spec:
           - name: DB_SERVER
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: DB_SERVER
           - name: DB_PORT
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: DB_PORT
           - name: DB_USER
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: DB_USER
           - name: DB_PASS
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: DB_PASS
           - name: BACKUP_VERSION
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: BACKUP_VERSION
         command: ["/bin/bash", "-c"]
         args:
           - |
-            BACKUP_DIR=/backup/mongo/
+            BACKUP_DIR=/var/opt/mssql/backup/
             BACKUP_DATE="$(date +'%Y-%m-%d_%H-%M-%S')"
-            BACKUP_FOLDER_NAME="${BACKUP_VERSION}_${BACKUP_DATE}"
-            echo $BACKUP_FOLDER_NAME > /config/BACKUP_FOLDER_NAME
+            BACKUP_FILE_NAME="${BACKUP_VERSION}_${BACKUP_DATE}.bak"
+            echo $BACKUP_FILE_NAME > /config/BACKUP_FILE_NAME
 
-            # Running the MongoDB backup using mongodump
-            mongodump --host $DB_SERVER --port $DB_PORT --username $DB_USER --password $DB_PASS --out "${BACKUP_DIR}/${BACKUP_FOLDER_NAME}"
+            # Running the sqlserver backup using mysqldump
+            /opt/mssql-tools/bin/sqlcmd -S ${DB_SERVER} -U SA -P ${DB_PASS} -Q "BACKUP DATABASE hangfire TO DISK = '${BACKUP_DIR}/${BACKUP_FILE_NAME}' WITH FORMAT"
 
             # COMPRESSING THE BACKUP
             # TO DECOMPRESS USE tar -xvzf <FILE-NAME>.tar.gz
-            cd $BACKUP_DIR
-            tar --checkpoint=1 --checkpoint-action=dot -zcvf ${BACKUP_FOLDER_NAME}.tar.gz $BACKUP_FOLDER_NAME
+            # cd $BACKUP_DIR
+            # tar --checkpoint=1 --checkpoint-action=dot -zcvf ${BACKUP_FILE_NAME}.tar.gz $BACKUP_FILE_NAME
 
-            # Extracting the archive to test its contents
-            mkdir test_extraction
-            tar -xzvf ${BACKUP_FOLDER_NAME}.tar.gz -C test_extraction
+            # # Extracting the archive to test its contents
+            # mkdir test_extraction
+            # tar -xzvf ${BACKUP_FILE_NAME}.tar.gz -C test_extraction
 
       - name: 'upload-and-remove'
         image: d3fk/s3cmd:latest
@@ -71,54 +72,51 @@ spec:
           - name: ACCESS_KEY
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: ACCESS_KEY
           - name: SECRET_KEY
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: SECRET_KEY
           - name: HOSTNAME
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: HOSTNAME
           - name: HOST_BUCKET
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: HOST_BUCKET
           - name: BUCKET_NAME
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: BUCKET_NAME
           - name: BUCKET_DIR
             valueFrom:
               secretKeyRef:
-                name: mongo-secret
+                name: sqlserver-secret
                 key: BUCKET_DIR
         volumeMounts:
-          - name: backup-volume
-            mountPath: /backup/mongo
+          - name: sqlserver-default-data
+            mountPath: /var/opt/mssql/backup/
+            readOnly: true
           - name: backup-volume
             mountPath: /config
         command: ["/bin/sh", "-c"]
         args: 
           - |
-            BACKUP_DIR=/backup/mongo
+            BACKUP_DIR=/var/opt/mssql/backup/
             # Extracting the backup folder name from the configuration file
-            export BACKUP_FOLDER_NAME=$(cat /config/BACKUP_FOLDER_NAME)
-            FILE_NAME=${BACKUP_FOLDER_NAME}.tar.gz
-            BACKUP_FILE="$BACKUP_DIR/$FILE_NAME"
+            export BACKUP_FILE_NAME=$(cat /config/BACKUP_FILE_NAME)
+            COMPRESSED_FILE=${BACKUP_FILE_NAME}
+            BACKUP_FILE="$BACKUP_DIR/$COMPRESSED_FILE"
 
             # Uploading the backup to object storage using s3cmd
             # SPECIFY THE --debug for debugging
-            s3cmd --access_key=$ACCESS_KEY --secret_key=$SECRET_KEY --host=$HOSTNAME --host-bucket=$HOST_BUCKET put $BACKUP_FILE s3://${BUCKET_NAME}/${BUCKET_DIR}/$FILE_NAME
-
-            # Removing all backup files
-            rm -rf $BACKUP_DIR/*
-            ls $BACKUP_DIR
-
+            s3cmd --access_key=$ACCESS_KEY --secret_key=$SECRET_KEY --host=$HOSTNAME --host-bucket=$HOST_BUCKET put $BACKUP_FILE s3://${BUCKET_NAME}/${BUCKET_DIR}/$COMPRESSED_FILE
+            
       restartPolicy: Never
   backoffLimit: 4
