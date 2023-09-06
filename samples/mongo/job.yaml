@@ -1,0 +1,124 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-backup
+spec:
+  template:
+    spec:
+      volumes:
+        - name: backup-volume
+          emptyDir: {}
+      containers:
+      - name: 'backup-and-compress'
+        image: mongo:latest
+        volumeMounts:
+          - name: backup-volume
+            mountPath: /backup/mongo
+          - name: backup-volume
+            mountPath: /config
+        env:
+          # Extracting sensitive database information from a Kubernetes secret
+          # to be used as environment variables
+          - name: DB_SERVER
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: DB_SERVER
+          - name: DB_PORT
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: DB_PORT
+          - name: DB_USER
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: DB_USER
+          - name: DB_PASS
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: DB_PASS
+          - name: BACKUP_VERSION
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: BACKUP_VERSION
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            BACKUP_DIR=/backup/mongo/
+            BACKUP_DATE="$(date +'%Y-%m-%d_%H-%M-%S')"
+            BACKUP_FOLDER_NAME="${BACKUP_VERSION}_${BACKUP_DATE}"
+            echo $BACKUP_FOLDER_NAME > /config/BACKUP_FOLDER_NAME
+
+            # Running the MongoDB backup using mongodump
+            mongodump --host $DB_SERVER --port $DB_PORT --username $DB_USER --password $DB_PASS --out "${BACKUP_DIR}/${BACKUP_FOLDER_NAME}"
+
+            # COMPRESSING THE BACKUP
+            # TO DECOMPRESS USE tar -xvzf <FILE-NAME>.tar.gz
+            cd $BACKUP_DIR
+            tar --checkpoint=1 --checkpoint-action=dot -zcvf ${BACKUP_FOLDER_NAME}.tar.gz $BACKUP_FOLDER_NAME
+
+            # Extracting the archive to test its contents
+            mkdir test_extraction
+            tar -xzvf ${BACKUP_FOLDER_NAME}.tar.gz -C test_extraction
+
+      - name: 'upload-and-remove'
+        image: d3fk/s3cmd:latest
+        env:
+          # Extracting object storage credentials from a Kubernetes secret
+          - name: ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: ACCESS_KEY
+          - name: SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: SECRET_KEY
+          - name: HOSTNAME
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: HOSTNAME
+          - name: HOST_BUCKET
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: HOST_BUCKET
+          - name: BUCKET_NAME
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: BUCKET_NAME
+          - name: BUCKET_DIR
+            valueFrom:
+              secretKeyRef:
+                name: mongo-secret
+                key: BUCKET_DIR
+        volumeMounts:
+          - name: backup-volume
+            mountPath: /backup/mongo
+          - name: backup-volume
+            mountPath: /config
+        command: ["/bin/sh", "-c"]
+        args: 
+          - |
+            BACKUP_DIR=/backup/mongo
+            # Extracting the backup folder name from the configuration file
+            export BACKUP_FOLDER_NAME=$(cat /config/BACKUP_FOLDER_NAME)
+            FILE_NAME=${BACKUP_FOLDER_NAME}.tar.gz
+            BACKUP_FILE="$BACKUP_DIR/$FILE_NAME"
+
+            # Uploading the backup to object storage using s3cmd
+            # SPECIFY THE --debug for debugging
+            s3cmd --access_key=$ACCESS_KEY --secret_key=$SECRET_KEY --host=$HOSTNAME --host-bucket=$HOST_BUCKET put $BACKUP_FILE s3://${BUCKET_NAME}/${BUCKET_DIR}/$FILE_NAME
+
+            # Removing all backup files
+            rm -rf $BACKUP_DIR/*
+            ls $BACKUP_DIR
+
+      restartPolicy: Never
+  backoffLimit: 4

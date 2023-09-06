@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: staticfile-backup
+spec:
+  template:
+    spec:
+      volumes:
+        - name: staticfile-default-data
+          persistentVolumeClaim:
+            claimName: static-sv-default-pvc
+      containers:
+      - name: 'upload-and-remove'
+        image: d3fk/s3cmd:latest
+        env:
+          # Extracting object storage credentials from a Kubernetes secret
+          - name: ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: staticfile-secret
+                key: ACCESS_KEY
+          - name: SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: staticfile-secret
+                key: SECRET_KEY
+          - name: HOSTNAME
+            valueFrom:
+              secretKeyRef:
+                name: staticfile-secret
+                key: HOSTNAME
+          - name: HOST_BUCKET
+            valueFrom:
+              secretKeyRef:
+                name: staticfile-secret
+                key: HOST_BUCKET
+          - name: BUCKET_NAME
+            valueFrom:
+              secretKeyRef:
+                name: staticfile-secret
+                key: BUCKET_NAME
+          - name: BUCKET_DIR
+            valueFrom:
+              secretKeyRef:
+                name: staticfile-secret
+                key: BUCKET_DIR
+          - name: BACKUP_VERSION
+            valueFrom:
+              secretKeyRef:
+                name: staticfile-secret
+                key: BACKUP_VERSION
+        volumeMounts:
+          - name: staticfile-default-data
+            mountPath: /app/data
+            readOnly: true
+        command: ["/bin/sh", "-c"]
+        args: 
+          - |
+            BACKUP_DIR=/app/data
+            BACKUP_FILE_NAME="$(date +'%Y-%m-%d_%H-%M-%S')"
+            BACKUP_FILE="${BACKUP_VERSION}_${BACKUP_FILE_NAME}"
+
+            # Uploading the backup to object storage using s3cmd
+            # SPECIFY THE --debug for debugging
+            s3cmd --access_key=$ACCESS_KEY --secret_key=$SECRET_KEY --host=$HOSTNAME --host-bucket=$HOST_BUCKET --recursive put $BACKUP_DIR s3://${BUCKET_NAME}/${BUCKET_DIR}/$BACKUP_FILE/
+            
+      restartPolicy: Never
+  backoffLimit: 4
